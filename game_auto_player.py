@@ -151,21 +151,16 @@ class GameGrid:
         """打印网格状态"""
         print("\n当前网格状态:")
         
-        # 打印列号
-        print("   ", end="")
-        for col in range(self.cols):
-            print(f"{col:2d} ", end="")
-        print()
-        
         for row in range(self.rows):
-            print(f"{row:2d}:", end="")
             for col in range(self.cols):
                 cell = self.grid[(row, col)]
                 if cell['is_empty']:
-                    print("  . ", end="")
+                    print(f"({row:02d},{col:02d},00)", end=" ")
                 else:
-                    print(f" {cell['type']}", end="")
-            print()
+                    # 将类型转换为两位数字
+                    item_id = cell['type'].zfill(2) if cell['type'] else "00"
+                    print(f"({row:02d},{col:02d},{item_id})", end=" ")
+            print()  # 换行
         
         # 额外显示25的位置
         print(f"\n25的所有位置:")
@@ -173,7 +168,7 @@ class GameGrid:
             for col in range(self.cols):
                 cell = self.grid[(row, col)]
                 if not cell['is_empty'] and cell['type'] == '25':
-                    print(f"  25 at ({row}, {col})")
+                    print(f"  25 at ({row:02d},{col:02d})")
 
 
 class GameAutoPlayer:
@@ -705,8 +700,23 @@ class GameAutoPlayer:
         # 等待动画
         time.sleep(0.5)
     
-    def find_one_move_pairs(self):
-        """查找只需一步移动就能配对的图标（不包括中间只有空格的情况）"""
+    def find_smart_moves(self):
+        """智能移动查找，考虑简单的连锁移动"""
+        
+        # 1. 首先找直接可行的移动
+        direct_moves = self.find_one_move_pairs()
+        if direct_moves:
+            return direct_moves
+        
+        # 2. 找需要一步清理的移动
+        clearing_moves = self.find_one_step_clearing_moves()
+        if clearing_moves:
+            return clearing_moves
+        
+        return []
+    
+    def find_one_step_clearing_moves(self):
+        """寻找只需要一步清理就能实现的目标移动"""
         opportunities = []
         
         # 统计每种类型的位置
@@ -717,6 +727,197 @@ class GameAutoPlayer:
                 if not cell['is_empty']:
                     type_positions[cell['type']].append((row, col))
         
+        # 对于每种有2个或以上的类型，检查是否能通过清理移动配对
+        for icon_type, positions in type_positions.items():
+            if len(positions) < 2:
+                continue
+            
+            # 检查所有配对组合
+            for i in range(len(positions)):
+                for j in range(i + 1, len(positions)):
+                    pos1 = positions[i]
+                    pos2 = positions[j]
+                    
+                    # 检查相邻行的情况（如你提到的15的例子）
+                    if abs(pos1[0] - pos2[0]) == 1 and pos1[1] == pos2[1]:
+                        # 同一列相邻行，检查是否能通过清理实现移动
+                        clearing_move = self.find_clearing_for_adjacent_rows(pos1, pos2, icon_type)
+                        if clearing_move:
+                            opportunities.append(clearing_move)
+                    
+                    # 检查相邻列的情况
+                    elif abs(pos1[1] - pos2[1]) == 1 and pos1[0] == pos2[0]:
+                        # 同一行相邻列，检查是否能通过清理实现移动
+                        clearing_move = self.find_clearing_for_adjacent_cols(pos1, pos2, icon_type)
+                        if clearing_move:
+                            opportunities.append(clearing_move)
+        
+        return opportunities
+    
+    def find_clearing_for_adjacent_rows(self, pos1, pos2, icon_type):
+        """为相邻行的配对寻找清理移动"""
+        row1, col = pos1
+        row2, _ = pos2
+        
+        # 确保row1 < row2
+        if row1 > row2:
+            row1, row2 = row2, row1
+            pos1, pos2 = pos2, pos1
+        
+        # 检查pos1能否向下移动到row2
+        target_row = row2
+        target_pos = (target_row, col)
+        
+        # 检查目标位置是否被占用
+        target_cell = self.grid.get_cell(target_row, col)
+        if target_cell['is_empty']:
+            # 目标位置是空的，可以直接移动
+            return {
+                'type': icon_type,
+                'pos1': pos1,
+                'pos2': pos2,
+                'move_type': 'col_slide_align',
+                'from_row': row1,
+                'from_col': col,
+                'to_row': target_row,
+                'to_col': col,
+                'distance': 1,
+                'priority': 1,
+                'will_create_match': True
+            }
+        
+        # 目标位置被占用，检查占用的方块能否移动
+        blocking_type = target_cell['type']
+        blocking_pos = (target_row, col)
+        
+        # 寻找阻挡方块的可行移动
+        clearing_moves = self.find_moves_for_position(blocking_pos, blocking_type)
+        
+        if clearing_moves:
+            # 返回清理移动序列
+            return {
+                'type': icon_type,
+                'pos1': pos1,
+                'pos2': pos2,
+                'move_type': 'clearing_sequence',
+                'clearing_moves': clearing_moves,
+                'final_move': {
+                    'from_row': row1,
+                    'from_col': col,
+                    'to_row': target_row,
+                    'to_col': col
+                },
+                'distance': len(clearing_moves) + 1,
+                'priority': len(clearing_moves) + 10,  # 清理移动优先级较低
+                'will_create_match': True
+            }
+        
+        return None
+    
+    def find_clearing_for_adjacent_cols(self, pos1, pos2, icon_type):
+        """为相邻列的配对寻找清理移动"""
+        row, col1 = pos1
+        _, col2 = pos2
+        
+        # 确保col1 < col2
+        if col1 > col2:
+            col1, col2 = col2, col1
+            pos1, pos2 = pos2, pos1
+        
+        # 检查pos1能否向右移动到col2
+        target_col = col2
+        target_pos = (row, target_col)
+        
+        # 检查目标位置是否被占用
+        target_cell = self.grid.get_cell(row, target_col)
+        if target_cell['is_empty']:
+            # 目标位置是空的，可以直接移动
+            return {
+                'type': icon_type,
+                'pos1': pos1,
+                'pos2': pos2,
+                'move_type': 'row_slide_align',
+                'from_row': row,
+                'from_col': col1,
+                'to_row': row,
+                'to_col': target_col,
+                'distance': 1,
+                'priority': 1,
+                'will_create_match': True
+            }
+        
+        # 目标位置被占用，检查占用的方块能否移动
+        blocking_type = target_cell['type']
+        blocking_pos = (row, target_col)
+        
+        # 寻找阻挡方块的可行移动
+        clearing_moves = self.find_moves_for_position(blocking_pos, blocking_type)
+        
+        if clearing_moves:
+            # 返回清理移动序列
+            return {
+                'type': icon_type,
+                'pos1': pos1,
+                'pos2': pos2,
+                'move_type': 'clearing_sequence',
+                'clearing_moves': clearing_moves,
+                'final_move': {
+                    'from_row': row,
+                    'from_col': col1,
+                    'to_row': row,
+                    'to_col': target_col
+                },
+                'distance': len(clearing_moves) + 1,
+                'priority': len(clearing_moves) + 10,
+                'will_create_match': True
+            }
+        
+        return None
+    
+    def find_moves_for_position(self, pos, piece_type):
+        """为指定位置的方块寻找可行的移动"""
+        row, col = pos
+        possible_moves = []
+        
+        # 检查四个方向的移动
+        directions = [
+            ('up', -1, 0),
+            ('down', 1, 0),
+            ('left', 0, -1),
+            ('right', 0, 1)
+        ]
+        
+        for direction, dr, dc in directions:
+            # 检查能移动多远
+            max_distance = 0
+            for distance in range(1, max(self.grid.rows, self.grid.cols)):
+                new_row = row + dr * distance
+                new_col = col + dc * distance
+                
+                # 检查边界
+                if (new_row < 0 or new_row >= self.grid.rows or 
+                    new_col < 0 or new_col >= self.grid.cols):
+                    break
+                
+                # 检查目标位置是否为空
+                target_cell = self.grid.get_cell(new_row, new_col)
+                if not target_cell['is_empty']:
+                    break
+                
+                max_distance = distance
+            
+            # 如果能移动，添加到可能移动列表
+            if max_distance > 0:
+                possible_moves.append({
+                    'from_pos': pos,
+                    'to_pos': (row + dr * max_distance, col + dc * max_distance),
+                    'direction': direction,
+                    'distance': max_distance,
+                    'type': piece_type
+                })
+        
+        return possible_moves
+
     def find_one_move_pairs(self):
         """查找只需一步移动就能配对的图标（不包括中间只有空格的情况）"""
         opportunities = []
@@ -745,15 +946,9 @@ class GameAutoPlayer:
                         row = pos1[0]
                         col1, col2 = sorted([pos1[1], pos2[1]])
                         
-                        # 检查中间是否都是空格（如果是，应该在find_adjacent_pairs中处理）
-                        all_empty = True
-                        for col in range(col1 + 1, col2):
-                            if not self.grid.get_cell(row, col)['is_empty']:
-                                all_empty = False
-                                break
-                        
-                        if all_empty:
-                            continue  # 中间都是空格，应该直接消除，不需要移动
+                        # 检查是否已经相邻（紧挨着）
+                        if col2 - col1 == 1:
+                            continue  # 已经相邻，应该直接消除，不需要移动
                         
                         # 检查能否通过行滑动让它们相邻
                         can_slide = self._can_slide_row(row, col1, col2)
@@ -777,15 +972,9 @@ class GameAutoPlayer:
                         col = pos1[1]
                         row1, row2 = sorted([pos1[0], pos2[0]])
                         
-                        # 检查中间是否都是空格
-                        all_empty = True
-                        for row in range(row1 + 1, row2):
-                            if not self.grid.get_cell(row, col)['is_empty']:
-                                all_empty = False
-                                break
-                        
-                        if all_empty:
-                            continue  # 中间都是空格，应该直接消除，不需要移动
+                        # 检查是否已经相邻（紧挨着）
+                        if row2 - row1 == 1:
+                            continue  # 已经相邻，应该直接消除，不需要移动
                         
                         # 检查能否通过列滑动让它们相邻
                         can_slide = self._can_slide_col(col, row1, row2)
@@ -940,38 +1129,46 @@ class GameAutoPlayer:
         """检查砖块组是否可以移动指定距离"""
         for row, col in group:
             if direction == 'down':
-                target_row = row + distance
-                if target_row >= self.grid.rows:
-                    return False
-                # 检查目标位置是否为空（且不在组内）
-                if (target_row, col) not in group:
-                    target_cell = self.grid.get_cell(target_row, col)
-                    if not target_cell['is_empty']:
+                # 检查从当前位置到目标位置的整个路径
+                for step in range(1, distance + 1):
+                    target_row = row + step
+                    if target_row >= self.grid.rows:
                         return False
+                    # 检查路径上的位置是否为空（且不在组内）
+                    if (target_row, col) not in group:
+                        target_cell = self.grid.get_cell(target_row, col)
+                        if not target_cell['is_empty']:
+                            return False
             elif direction == 'up':
-                target_row = row - distance
-                if target_row < 0:
-                    return False
-                if (target_row, col) not in group:
-                    target_cell = self.grid.get_cell(target_row, col)
-                    if not target_cell['is_empty']:
+                # 检查从当前位置到目标位置的整个路径
+                for step in range(1, distance + 1):
+                    target_row = row - step
+                    if target_row < 0:
                         return False
+                    if (target_row, col) not in group:
+                        target_cell = self.grid.get_cell(target_row, col)
+                        if not target_cell['is_empty']:
+                            return False
             elif direction == 'right':
-                target_col = col + distance
-                if target_col >= self.grid.cols:
-                    return False
-                if (row, target_col) not in group:
-                    target_cell = self.grid.get_cell(row, target_col)
-                    if not target_cell['is_empty']:
+                # 检查从当前位置到目标位置的整个路径
+                for step in range(1, distance + 1):
+                    target_col = col + step
+                    if target_col >= self.grid.cols:
                         return False
+                    if (row, target_col) not in group:
+                        target_cell = self.grid.get_cell(row, target_col)
+                        if not target_cell['is_empty']:
+                            return False
             elif direction == 'left':
-                target_col = col - distance
-                if target_col < 0:
-                    return False
-                if (row, target_col) not in group:
-                    target_cell = self.grid.get_cell(row, target_col)
-                    if not target_cell['is_empty']:
+                # 检查从当前位置到目标位置的整个路径
+                for step in range(1, distance + 1):
+                    target_col = col - step
+                    if target_col < 0:
                         return False
+                    if (row, target_col) not in group:
+                        target_cell = self.grid.get_cell(row, target_col)
+                        if not target_cell['is_empty']:
+                            return False
         
         return True
     
@@ -981,21 +1178,44 @@ class GameAutoPlayer:
         if from_row == to_row:
             return False  # 已经对齐
         
-        # 使用简单的路径检查：只有当路径上所有位置都是空的时候才能移动
+        # 首先检查简单情况：路径上都是空的
         if from_row < to_row:
             # 向下移动：检查from_row+1到to_row之间是否都是空的
+            all_empty = True
             for check_row in range(from_row + 1, to_row + 1):
                 cell = self.grid.get_cell(check_row, from_col)
                 if not cell['is_empty']:
-                    return False
+                    all_empty = False
+                    break
+            if all_empty:
+                return True
         else:
             # 向上移动：检查to_row到from_row-1之间是否都是空的
+            all_empty = True
             for check_row in range(to_row, from_row):
                 cell = self.grid.get_cell(check_row, from_col)
                 if not cell['is_empty']:
-                    return False
+                    all_empty = False
+                    break
+            if all_empty:
+                return True
         
-        return True
+        # 如果简单移动不行，检查方块组移动
+        if from_row < to_row:
+            # 向下移动：找到从from_row开始向下的连续块组
+            direction = 'down'
+            distance = to_row - from_row
+            group = self.find_connected_group(from_row, from_col, direction)
+        else:
+            # 向上移动：找到从from_row开始向上的连续块组
+            direction = 'up'
+            distance = from_row - to_row
+            group = self.find_connected_group(from_row, from_col, direction)
+        
+        # 检查组是否可以移动
+        can_move = self.can_move_group(group, direction, distance)
+        
+        return can_move
     
     def _can_slide_to_align_row(self, from_row, from_col, to_row, to_col):
         """检查是否可以通过行滑动让图标对齐（用于相邻行的情况）"""
@@ -1003,21 +1223,44 @@ class GameAutoPlayer:
         if from_col == to_col:
             return False  # 已经对齐
         
-        # 使用简单的路径检查：只有当路径上所有位置都是空的时候才能移动
+        # 首先检查简单情况：路径上都是空的
         if from_col < to_col:
             # 向右移动：检查from_col+1到to_col之间是否都是空的
+            all_empty = True
             for check_col in range(from_col + 1, to_col + 1):
                 cell = self.grid.get_cell(from_row, check_col)
                 if not cell['is_empty']:
-                    return False
+                    all_empty = False
+                    break
+            if all_empty:
+                return True
         else:
             # 向左移动：检查to_col到from_col-1之间是否都是空的
+            all_empty = True
             for check_col in range(to_col, from_col):
                 cell = self.grid.get_cell(from_row, check_col)
                 if not cell['is_empty']:
-                    return False
+                    all_empty = False
+                    break
+            if all_empty:
+                return True
         
-        return True
+        # 如果简单移动不行，检查方块组移动
+        if from_col < to_col:
+            # 向右移动：找到从from_col开始向右的连续块组
+            direction = 'right'
+            distance = to_col - from_col
+            group = self.find_connected_group(from_row, from_col, direction)
+        else:
+            # 向左移动：找到从from_col开始向左的连续块组
+            direction = 'left'
+            distance = from_col - to_col
+            group = self.find_connected_group(from_row, from_col, direction)
+        
+        # 检查组是否可以移动
+        can_move = self.can_move_group(group, direction, distance)
+        
+        return can_move
         
         return can_move
     
@@ -1177,6 +1420,38 @@ class GameAutoPlayer:
             pyautogui.drag(0, pixel_distance, duration=0.8)  # 稍慢一点确保块组一起移动
             time.sleep(0.5)
             
+        elif move_type == 'clearing_sequence':
+            # 执行清理移动序列
+            print(f"执行清理移动序列: {len(opportunity['clearing_moves'])} 步清理 + 1 步目标移动")
+            
+            # 先执行所有清理移动
+            for i, clearing_move in enumerate(opportunity['clearing_moves']):
+                print(f"  清理步骤 {i+1}: 移动 {clearing_move['type']} 从 {clearing_move['from_pos']} 到 {clearing_move['to_pos']}")
+                
+                # 执行单个清理移动
+                success = self.execute_simple_move(clearing_move)
+                if not success:
+                    print(f"清理移动失败，中止序列")
+                    return False
+                
+                # 等待动画完成
+                time.sleep(0.8)
+            
+            # 执行最终的目标移动
+            final_move = opportunity['final_move']
+            print(f"  最终移动: {opportunity['type']} 从 ({final_move['from_row']}, {final_move['from_col']}) 到 ({final_move['to_row']}, {final_move['to_col']})")
+            
+            final_move_opp = {
+                'type': opportunity['type'],
+                'move_type': 'col_slide_align' if final_move['from_col'] == final_move['to_col'] else 'row_slide_align',
+                'from_row': final_move['from_row'],
+                'from_col': final_move['from_col'],
+                'to_row': final_move['to_row'],
+                'to_col': final_move['to_col']
+            }
+            
+            return self.execute_slide(final_move_opp)
+            
         elif move_type == 'row_slide_align':
             # 行滑动对齐（用于相邻行的情况）- 使用块组移动
             from_row = opportunity['from_row']
@@ -1211,6 +1486,52 @@ class GameAutoPlayer:
             time.sleep(0.5)
         
         self.move_count += 1
+        return True
+    
+    def execute_simple_move(self, move):
+        """执行简单的单步移动"""
+        from_pos = move['from_pos']
+        to_pos = move['to_pos']
+        direction = move['direction']
+        
+        from_row, from_col = from_pos
+        to_row, to_col = to_pos
+        
+        from_cell = self.grid.get_cell(from_row, from_col)
+        if from_cell['is_empty']:
+            print(f"警告: 起始位置 {from_pos} 为空，无法移动")
+            return False
+        
+        # 计算移动距离
+        if direction in ['left', 'right']:
+            pixel_distance = abs(to_col - from_col) * self.grid.cell_width
+            if direction == 'left':
+                pixel_distance = -pixel_distance
+            
+            start_x = from_cell['abs_center_x']
+            start_y = from_cell['abs_center_y']
+            
+            print(f"    简单移动: 从 ({start_x}, {start_y}) 向{direction}移动 {abs(to_col - from_col)} 格")
+            
+            pyautogui.moveTo(start_x, start_y)
+            time.sleep(0.2)
+            pyautogui.drag(pixel_distance, 0, duration=0.5)
+            
+        else:  # up, down
+            pixel_distance = abs(to_row - from_row) * self.grid.cell_height
+            if direction == 'up':
+                pixel_distance = -pixel_distance
+            
+            start_x = from_cell['abs_center_x']
+            start_y = from_cell['abs_center_y']
+            
+            print(f"    简单移动: 从 ({start_x}, {start_y}) 向{direction}移动 {abs(to_row - from_row)} 格")
+            
+            pyautogui.moveTo(start_x, start_y)
+            time.sleep(0.2)
+            pyautogui.drag(0, pixel_distance, duration=0.5)
+        
+        return True
     
     def play_one_round(self):
         """执行一轮游戏"""
@@ -1234,8 +1555,8 @@ class GameAutoPlayer:
         
         print("没有找到可直接消除的配对，寻找需要移动的机会...")
         
-        # 2. 查找一步移动的机会
-        opportunities = self.find_one_move_pairs()
+        # 2. 使用智能移动查找（包括清理移动）
+        opportunities = self.find_smart_moves()
         
         # 过滤掉最近执行过的移动和重复的移动
         filtered_opportunities = []

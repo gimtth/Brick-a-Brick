@@ -24,7 +24,7 @@ class GameIconMatcher:
         template_path = Path(self.templates_dir)
         
         for category_dir in template_path.iterdir():
-            if category_dir.is_dir():
+            if category_dir.is_dir() and category_dir.name != 'empty':  # 排除empty目录
                 category_id = category_dir.name
                 self.templates[category_id] = []
                 
