@@ -1,6 +1,7 @@
 """
 游戏自动玩家
 功能：自动识别、分析并执行游戏操作
+整合：zhuan-solver的GBFS搜索算法
 """
 
 import cv2
@@ -13,6 +14,9 @@ import json
 import os
 from collections import defaultdict
 from game_icon_matcher import GameIconMatcher
+from state.search import GBFS
+from app.zhuan.board_state import BoardState
+from app.zhuan.zhuan_node import ZhuanNode
 
 
 class GameGrid:
@@ -115,7 +119,7 @@ class GameGrid:
         # 警告：如果空格子太多可能是识别问题
         if empty > self.rows * self.cols * 0.3:
             print(f"警告：空格子比例较高 ({empty}/{self.rows * self.cols})，可能存在识别遗漏")
-            print("建议检查 debug_screenshot.png 和 debug_matched.png")
+            print("建议检查 move/debug_screenshot.png 和 move/debug_matched.png")
         
         return True
     
@@ -179,9 +183,350 @@ class GameAutoPlayer:
         self.grid = GameGrid()
         self.game_region = None  # (x1, y1, x2, y2)
         self.move_count = 0
-        self.config_file = 'game_region_config.json'
+        self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'game_region_config.json')
         self.last_moves = []  # 记录最近的移动，避免重复
         self.max_history = 5  # 最多记录5次移动历史
+        self.solution_path = None  # GBFS求解路径
+    
+    def solve_with_gbfs(self):
+        """使用GBFS算法求解游戏"""
+        print("\n" + "=" * 50)
+        print("使用 GBFS 算法求解...")
+        print("=" * 50)
+        
+        # 从grid构建棋盘矩阵
+        if not self.grid.grid:
+            print("错误：棋盘数据为空")
+            return None
+        
+        # 构建矩阵，0表示空格
+        matrix = []
+        for row in range(self.grid.rows):
+            row_data = []
+            for col in range(self.grid.cols):
+                cell = self.grid.get_cell(row, col)
+                if cell['is_empty']:
+                    row_data.append(0)
+                else:
+                    # 使用类型的数字（去掉前导零）
+                    type_id = int(cell['type'])
+                    row_data.append(type_id)
+            matrix.append(row_data)
+        
+        print(f"棋盘大小: {self.grid.rows} x {self.grid.cols}")
+        
+        # 创建初始状态
+        initial_state = BoardState(matrix)
+        start_node = ZhuanNode(initial_state)
+        
+        # 执行GBFS搜索
+        searcher = GBFS(start_node)
+        path = searcher.search()
+        
+        if path:
+            print(f"\n✓ 找到解决方案! 共 {len(path)-1} 步")
+            searcher.show_algorithm_stats()
+            self.solution_path = path
+            return path
+        else:
+            print("\n✗ 未找到解决方案")
+            searcher.show_algorithm_stats()
+            return None
+    
+    def preview_solution(self):
+        """预览解决方案：在窗口中可视化每步移动"""
+        if not self.solution_path:
+            print("没有解决方案可预览")
+            return
+        
+        print("\n" + "=" * 60)
+        print("可视化预览模式")
+        print("=" * 60)
+        print("按键说明:")
+        print("  空格/回车 - 下一步")
+        print("  b - 上一步")
+        print("  q/ESC - 退出预览")
+        print("=" * 60)
+        
+        # 记录每步后的棋盘状态
+        board_states = [self._get_board_matrix()]
+        
+        # 模拟每步移动，记录状态变化
+        current_matrix = [row[:] for row in self._get_board_matrix()]
+        for node in self.solution_path[1:]:  # 跳过初始状态
+            if node.from_action:
+                start, end, dir_key = node.from_action
+                start_row, start_col = start
+                end_row, end_col = end
+                
+                # 模拟移动
+                block_type = current_matrix[start_row][start_col]
+                if start != end:
+                    # 拖动移动：清空起点，终点被覆盖
+                    current_matrix[start_row][start_col] = 0
+                    current_matrix[end_row][end_col] = 0  # 消除
+                else:
+                    # 原地点击消除
+                    current_matrix[start_row][start_col] = 0
+                    # 找到配对的方块也消除
+                    for r in range(len(current_matrix)):
+                        for c in range(len(current_matrix[0])):
+                            if (r, c) != (start_row, start_col) and current_matrix[r][c] == block_type:
+                                current_matrix[r][c] = 0
+                                break
+                    
+            board_states.append([row[:] for row in current_matrix])
+        
+        # 可视化循环
+        current_step = 0
+        total_steps = len(self.solution_path) - 1
+        
+        while True:
+            # 创建当前步骤的可视化图像
+            img = self._visualize_step(board_states[current_step], current_step)
+            
+            # 显示步骤信息
+            if current_step == 0:
+                title = f"初始状态 - 按空格开始"
+            elif current_step < len(self.solution_path):
+                node = self.solution_path[current_step]
+                if node.from_action:
+                    start, end, dir_key = node.from_action
+                    title = f"步骤 {current_step}/{total_steps}"
+                else:
+                    title = f"步骤 {current_step}/{total_steps}"
+            else:
+                title = f"完成! 共 {total_steps} 步"
+            
+            cv2.imshow('解决方案预览', img)
+            cv2.setWindowTitle('解决方案预览', title)
+            
+            # 等待按键
+            key = cv2.waitKey(0) & 0xFF
+            
+            if key == ord('q') or key == 27:  # q 或 ESC
+                break
+            elif key == ord(' ') or key == 13:  # 空格或回车
+                if current_step < len(board_states) - 1:
+                    current_step += 1
+            elif key == ord('b'):  # 返回上一步
+                if current_step > 0:
+                    current_step -= 1
+        
+        cv2.destroyAllWindows()
+    
+    def _get_board_matrix(self):
+        """获取当前棋盘矩阵"""
+        matrix = []
+        for row in range(self.grid.rows):
+            row_data = []
+            for col in range(self.grid.cols):
+                cell = self.grid.get_cell(row, col)
+                if cell['is_empty']:
+                    row_data.append(0)
+                else:
+                    row_data.append(int(cell['type']))
+            matrix.append(row_data)
+        return matrix
+    
+    def _visualize_step(self, matrix, step):
+        """可视化单步棋盘状态"""
+        rows = len(matrix)
+        cols = len(matrix[0])
+        
+        # 每个格子大小
+        cell_size = 50
+        padding = 60  # 左上角留出空间显示行列号
+        
+        # 图像尺寸
+        width = cols * cell_size + padding
+        height = rows * cell_size + padding
+        
+        # 创建白色背景
+        img = np.ones((height, width, 3), dtype=np.uint8) * 255
+        
+        # 颜色映射（根据方块类型）
+        colors = self._get_block_colors()
+        
+        # 绘制网格和方块
+        for row in range(rows):
+            for col in range(cols):
+                x = col * cell_size + padding
+                y = row * cell_size + padding
+                
+                block_type = matrix[row][col]
+                
+                if block_type > 0:
+                    # 绘制方块
+                    color = colors.get(block_type % len(colors), (100, 100, 100))
+                    cv2.rectangle(img, (x+2, y+2), (x+cell_size-2, y+cell_size-2), color, -1)
+                    cv2.rectangle(img, (x+2, y+2), (x+cell_size-2, y+cell_size-2), (50, 50, 50), 1)
+                    
+                    # 显示类型编号
+                    cv2.putText(img, str(block_type), (x+15, y+35), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                else:
+                    # 空格子
+                    cv2.rectangle(img, (x+2, y+2), (x+cell_size-2, y+cell_size-2), (240, 240, 240), -1)
+                    cv2.rectangle(img, (x+2, y+2), (x+cell_size-2, y+cell_size-2), (200, 200, 200), 1)
+        
+        # 绘制行号
+        for row in range(rows):
+            y = row * cell_size + padding + cell_size // 2 + 5
+            cv2.putText(img, str(row), (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+        
+        # 绘制列号
+        for col in range(cols):
+            x = col * cell_size + padding + cell_size // 2 - 5
+            cv2.putText(img, str(col), (x, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+        
+        # 绘制步骤信息
+        if step > 0 and step < len(self.solution_path):
+            node = self.solution_path[step]
+            if node.from_action:
+                start, end, dir_key = node.from_action
+                start_row, start_col = start
+                end_row, end_col = end
+                
+                # 高亮起始位置（红色边框）
+                x = start_col * cell_size + padding
+                y = start_row * cell_size + padding
+                cv2.rectangle(img, (x, y), (x+cell_size, y+cell_size), (0, 0, 255), 3)
+                
+                # 如果是移动操作，高亮终点
+                if start != end:
+                    x2 = end_col * cell_size + padding
+                    y2 = end_row * cell_size + padding
+                    cv2.rectangle(img, (x2, y2), (x2+cell_size, y2+cell_size), (255, 0, 0), 3)
+                    
+                    # 绘制箭头
+                    cx1, cy1 = x + cell_size//2, y + cell_size//2
+                    cx2, cy2 = x2 + cell_size//2, y2 + cell_size//2
+                    cv2.arrowedLine(img, (cx1, cy1), (cx2, cy2), (0, 165, 255), 2)
+        
+        return img
+    
+    def _get_block_colors(self):
+        """获取方块颜色映射"""
+        return {
+            0: (240, 240, 240),  # 空 - 浅灰
+            1: (255, 99, 71),    # 番茄红
+            2: (30, 144, 255),   # 道奇蓝
+            3: (50, 205, 50),    # 酸橙绿
+            4: (255, 215, 0),    # 金色
+            5: (238, 130, 238),  # 紫罗兰
+            6: (255, 165, 0),    # 橙色
+            7: (0, 206, 209),    # 深青色
+            8: (255, 20, 147),   # 深粉色
+            9: (154, 205, 50),   # 黄绿色
+            10: (70, 130, 180),  # 钢蓝色
+            11: (220, 20, 60),   # 猩红色
+            12: (0, 255, 127),   # 春绿色
+            13: (255, 105, 180), # 热粉色
+            14: (138, 43, 226),  # 蓝紫色
+            15: (0, 139, 139),   # 深青色
+            16: (255, 69, 0),    # 橙红色
+            17: (46, 139, 87),   # 海绿色
+            18: (199, 21, 133),  # 中紫罗兰红
+            19: (25, 25, 112),   # 午夜蓝
+            20: (128, 0, 0),     # 栗色
+        }
+    
+    def _print_board_matrix(self):
+        """打印棋盘矩阵"""
+        # 打印列号
+        print("     ", end="")
+        for col in range(self.grid.cols):
+            print(f"{col:3d}", end=" ")
+        print()
+        
+        # 打印每行
+        for row in range(self.grid.rows):
+            print(f"{row:3d} ", end="")
+            for col in range(self.grid.cols):
+                cell = self.grid.get_cell(row, col)
+                if cell['is_empty']:
+                    print("   0", end=" ")
+                else:
+                    print(f"{int(cell['type']):4d}", end=" ")
+            print()
+    
+    def execute_solution(self, move_delay=0.5):
+        """执行GBFS求解的路径"""
+        if not self.solution_path:
+            print("没有解决方案可执行")
+            return False
+        
+        print("\n" + "=" * 60)
+        print("开始执行解决方案")
+        print("=" * 60)
+        print(f"总共需要 {len(self.solution_path)-1} 步")
+        print(f"移动间隔: {move_delay}秒")
+        print("\n⚠️ 注意：鼠标将被自动控制")
+        print("⚠️ 紧急停止：将鼠标移到屏幕左上角")
+        
+        input("\n按回车键开始执行...")
+        
+        total_moves = len(self.solution_path) - 1
+        
+        for step, node in enumerate(self.solution_path):
+            if node.from_action:
+                start, end, dir_key = node.from_action
+                print(f"\n[步骤 {step}/{total_moves}]")
+                print(f"移动: {start} -> {end}, 方向: {dir_key}")
+                
+                # 执行移动
+                self._execute_gbfs_move(start, end, dir_key)
+                self.move_count += 1
+                time.sleep(move_delay)
+        
+        print("\n" + "=" * 60)
+        print("✓ 执行完成!")
+        print("=" * 60)
+        return True
+    
+    def _execute_gbfs_move(self, start, end, search_dir):
+        """执行GBFS求解中的单步移动"""
+        start_row, start_col = start
+        end_row, end_col = end
+        
+        # 获取屏幕坐标
+        start_cell = self.grid.get_cell(start_row, start_col)
+        if not start_cell or start_cell['is_empty']:
+            print(f"警告：起始位置无效")
+            return
+        
+        start_x = start_cell['abs_center_x']
+        start_y = start_cell['abs_center_y']
+        
+        if start == end:
+            # 原地点击消除
+            print(f"  原地点击: ({start_x}, {start_y})")
+            pyautogui.click(start_x, start_y)
+        else:
+            # 拖动操作 - 往终点方向多偏移一点
+            distance = abs(start_row - end_row) + abs(start_col - end_col)
+            
+            # 计算偏移方向，多移动0.4格
+            if end_row != start_row:
+                offset_row = 0.4 if end_row > start_row else -0.4
+            else:
+                offset_row = 0
+            
+            if end_col != start_col:
+                offset_col = 0.4 if end_col > start_col else -0.4
+            else:
+                offset_col = 0
+            
+            end_x = self.grid.region_offset[0] + (end_col + 0.5 + offset_col) * self.grid.cell_width
+            end_y = self.grid.region_offset[1] + (end_row + 0.5 + offset_row) * self.grid.cell_height
+            
+            print(f"  拖动: ({start_x}, {start_y}) -> ({int(end_x)}, {int(end_y)})")
+            
+            # 执行拖动，距离越远时间越长
+            duration = 0.1 + distance * 0.1
+            pyautogui.moveTo(start_x, start_y)
+            pyautogui.dragTo(end_x, end_y, duration=duration)
     
     def get_region_by_mouse(self):
         """通过鼠标获取游戏区域坐标"""
@@ -251,8 +596,8 @@ class GameAutoPlayer:
         screenshot = ImageGrab.grab(bbox=(x1, y1, x2, y2))
         screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
         
-        cv2.imwrite('verify_region.png', screenshot)
-        print(f"验证截图已保存到 verify_region.png")
+        cv2.imwrite(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'verify_region.png'), screenshot)
+        print(f"验证截图已保存到 move/verify_region.png")
         print(f"截图尺寸: {screenshot.shape[1]} x {screenshot.shape[0]}")
         
         if screenshot.shape[1] == (x2-x1) and screenshot.shape[0] == (y2-y1):
@@ -395,8 +740,8 @@ class GameAutoPlayer:
         
         # 保存调试图片
         if save_debug:
-            cv2.imwrite('debug_screenshot.png', screenshot)
-            print("调试截图已保存到 debug_screenshot.png")
+            cv2.imwrite(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug_screenshot.png'), screenshot)
+            print("调试截图已保存到 move/debug_screenshot.png")
         
         # 识别图标 - 降低阈值以识别更多图标
         results = self.matcher.match_icons(screenshot, threshold=0.70, use_multiscale=True)
@@ -415,8 +760,8 @@ class GameAutoPlayer:
         # 保存标注结果用于调试
         if save_debug:
             debug_output = self.matcher.draw_results(screenshot, results)
-            cv2.imwrite('debug_matched.png', debug_output)
-            print("标注结果已保存到 debug_matched.png")
+            cv2.imwrite(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug_matched.png'), debug_output)
+            print("标注结果已保存到 move/debug_matched.png")
         
         # 构建网格
         region_offset = (x1, y1)
@@ -1654,14 +1999,45 @@ def main():
         print("初始化失败")
         return
     
-    # 询问是否开始自动游戏
-    print("\n准备开始自动游戏")
-    print("注意：鼠标将被自动控制")
-    print("如需紧急停止，将鼠标移到屏幕左上角")
-    input("按回车键开始...")
+    # 选择游戏模式
+    print("\n" + "=" * 60)
+    print("选择游戏模式")
+    print("=" * 60)
+    print("1. GBFS智能求解（推荐） - 一次性求解并执行所有步骤")
+    print("2. 逐轮自动游戏 - 每轮识别并寻找移动机会")
+    print("\n请选择模式 (1/2，回车=1): ", end="")
     
-    # 开始自动游戏
-    player.auto_play()
+    choice = input().strip()
+    
+    if choice == "" or choice == "1":
+        # GBFS模式
+        print("\n使用 GBFS 智能求解模式")
+        
+        # 求解
+        path = player.solve_with_gbfs()
+        
+        if path:
+            # 预览模式：输出棋盘和每步移动
+            player.preview_solution()
+            
+            # 询问是否执行
+            print("\n是否执行此方案？(y/n，回车=y): ", end="")
+            choice = input().strip().lower()
+            
+            if choice == '' or choice == 'y':
+                player.execute_solution(move_delay=0.5)
+            else:
+                print("已取消执行")
+        else:
+            print("求解失败，尝试使用逐轮模式...")
+            player.auto_play()
+    else:
+        # 逐轮模式
+        print("\n使用逐轮自动游戏模式")
+        print("注意：鼠标将被自动控制")
+        print("如需紧急停止，将鼠标移到屏幕左上角")
+        input("按回车键开始...")
+        player.auto_play()
 
 
 if __name__ == '__main__':

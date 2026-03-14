@@ -13,7 +13,9 @@ import time
 class GameIconMatcher:
     def __init__(self, templates_dir='tiles_standardized'):
         """初始化图标匹配器"""
-        self.templates_dir = templates_dir
+        # 使用绝对路径
+        script_dir = Path(__file__).parent
+        self.templates_dir = script_dir / templates_dir
         self.templates = {}
         self.load_templates()
         self.region = None
@@ -416,8 +418,8 @@ class GameIconMatcher:
         print(f"区域尺寸: {x2-x1}x{y2-y1}")
         
         # 保存原始截图用于对比
-        cv2.imwrite('original_region.png', screenshot)
-        print("原始区域已保存到 original_region.png")
+        cv2.imwrite(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'original_region.png'), screenshot)
+        print("原始区域已保存到 move/original_region.png")
         
         # 匹配图标
         print(f"\n正在匹配图标 (阈值: {threshold}, 多尺度: {use_multiscale})...")
@@ -438,8 +440,8 @@ class GameIconMatcher:
             cv2.destroyAllWindows()
             
             # 保存结果
-            cv2.imwrite('match_result.png', output)
-            print("\n结果已保存到 match_result.png")
+            cv2.imwrite(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'match_result.png'), output)
+            print("\n结果已保存到 move/match_result.png")
         
         return results
 
