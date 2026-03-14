@@ -248,34 +248,15 @@ class GameAutoPlayer:
         print("  q/ESC - 退出预览")
         print("=" * 60)
         
-        # 记录每步后的棋盘状态
-        board_states = [self._get_board_matrix()]
-        
-        # 模拟每步移动，记录状态变化
-        current_matrix = [row[:] for row in self._get_board_matrix()]
-        for node in self.solution_path[1:]:  # 跳过初始状态
-            if node.from_action:
-                start, end, dir_key = node.from_action
-                start_row, start_col = start
-                end_row, end_col = end
-                
-                # 模拟移动
-                block_type = current_matrix[start_row][start_col]
-                if start != end:
-                    # 拖动移动：清空起点，终点被覆盖
-                    current_matrix[start_row][start_col] = 0
-                    current_matrix[end_row][end_col] = 0  # 消除
-                else:
-                    # 原地点击消除
-                    current_matrix[start_row][start_col] = 0
-                    # 找到配对的方块也消除
-                    for r in range(len(current_matrix)):
-                        for c in range(len(current_matrix[0])):
-                            if (r, c) != (start_row, start_col) and current_matrix[r][c] == block_type:
-                                current_matrix[r][c] = 0
-                                break
-                    
-            board_states.append([row[:] for row in current_matrix])
+        # 记录每步后的棋盘状态 - 直接使用节点的实际状态
+        board_states = []
+        for node in self.solution_path:
+            # 从节点的BoardState获取棋盘矩阵
+            if hasattr(node, 'state') and hasattr(node.state, 'tiles'):
+                board_states.append([list(row) for row in node.state.tiles])
+            else:
+                # 如果节点没有状态，使用当前网格
+                board_states.append(self._get_board_matrix())
         
         # 可视化循环
         current_step = 0
@@ -451,7 +432,7 @@ class GameAutoPlayer:
                     print(f"{int(cell['type']):4d}", end=" ")
             print()
     
-    def execute_solution(self, move_delay=0.5):
+    def execute_solution(self, move_delay=1.0):
         """执行GBFS求解的路径"""
         if not self.solution_path:
             print("没有解决方案可执行")
@@ -463,7 +444,8 @@ class GameAutoPlayer:
         print(f"总共需要 {len(self.solution_path)-1} 步")
         print(f"移动间隔: {move_delay}秒")
         print("\n⚠️ 注意：鼠标将被自动控制")
-        print("⚠️ 紧急停止：将鼠标移到屏幕左上角")
+        print("⚠️ 暂停：将鼠标移到屏幕左上角（移回游戏区域继续）")
+        print("⚠️ 退出：暂停时按 q 键")
         
         input("\n按回车键开始执行...")
         
@@ -471,6 +453,25 @@ class GameAutoPlayer:
         
         for step, node in enumerate(self.solution_path):
             if node.from_action:
+                # 检查暂停/继续
+                x, y = pyautogui.position()
+                if x < 10 and y < 10:
+                    print("\n⏸️ 暂停执行 - 鼠标移入游戏区域后自动继续")
+                    
+                    # 等待鼠标回到游戏区域
+                    while True:
+                        mx, my = pyautogui.position()
+                        # 检查是否在游戏区域内
+                        if (self.game_region[0] <= mx <= self.game_region[2] and 
+                            self.game_region[1] <= my <= self.game_region[3]):
+                            print("▶️ 继续执行...")
+                            break
+                        # 检查是否按q退出
+                        if keyboard.is_pressed('q'):
+                            print("⚠️ 用户取消执行")
+                            return False
+                        time.sleep(0.1)
+                
                 start, end, dir_key = node.from_action
                 print(f"\n[步骤 {step}/{total_moves}]")
                 print(f"移动: {start} -> {end}, 方向: {dir_key}")
@@ -524,9 +525,11 @@ class GameAutoPlayer:
             print(f"  拖动: ({start_x}, {start_y}) -> ({int(end_x)}, {int(end_y)})")
             
             # 执行拖动，距离越远时间越长
-            duration = 0.1 + distance * 0.1
-            pyautogui.moveTo(start_x, start_y)
+            duration = 0.2 + distance * 0.15  # 增加拖动时间
+            pyautogui.moveTo(start_x, start_y, duration=0.1)
+            time.sleep(0.2)  # 移动后等待一下
             pyautogui.dragTo(end_x, end_y, duration=duration)
+            time.sleep(0.3)  # 拖动后等待游戏响应
     
     def get_region_by_mouse(self):
         """通过鼠标获取游戏区域坐标"""
