@@ -13,6 +13,8 @@ import time
 import json
 import os
 from collections import defaultdict
+import win32api
+import win32con
 from game_icon_matcher import GameIconMatcher
 from state.search import GBFS
 from app.zhuan.board_state import BoardState
@@ -187,6 +189,57 @@ class GameAutoPlayer:
         self.last_moves = []  # 记录最近的移动，避免重复
         self.max_history = 5  # 最多记录5次移动历史
         self.solution_path = None  # GBFS求解路径
+    
+    def _drag_to(self, start_x, start_y, end_x, end_y, duration=0.3):
+        """使用 win32api 执行可靠的拖动操作
+        
+        自动检测水平/垂直移动，确保走直线
+        """
+        start_x, start_y = int(start_x), int(start_y)
+        end_x, end_y = int(end_x), int(end_y)
+        
+        # 移动到起点
+        win32api.SetCursorPos((start_x, start_y))
+        time.sleep(0.1)
+        
+        # 按下鼠标左键
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+        time.sleep(0.05)
+        
+        # 判断移动方向，确保走直线
+        dx = end_x - start_x
+        dy = end_y - start_y
+        
+        if abs(dx) > abs(dy):
+            # 水平移动为主，锁定 Y 坐标
+            steps = max(10, int(duration * 60))
+            for i in range(1, steps + 1):
+                x = start_x + dx * i // steps
+                win32api.SetCursorPos((x, start_y))  # Y 保持不变
+                time.sleep(duration / steps)
+            win32api.SetCursorPos((end_x, start_y))
+        else:
+            # 垂直移动为主，锁定 X 坐标
+            steps = max(10, int(duration * 60))
+            for i in range(1, steps + 1):
+                y = start_y + dy * i // steps
+                win32api.SetCursorPos((start_x, y))  # X 保持不变
+                time.sleep(duration / steps)
+            win32api.SetCursorPos((start_x, end_y))
+        
+        # 确保到达终点
+        win32api.SetCursorPos((end_x, end_y))
+        time.sleep(0.05)
+        
+        # 释放鼠标左键
+        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        time.sleep(0.1)
+    
+    def _drag_rel(self, start_x, start_y, dx, dy, duration=0.3):
+        """使用 win32api 执行相对距离拖动"""
+        end_x = start_x + dx
+        end_y = start_y + dy
+        self._drag_to(start_x, start_y, end_x, end_y, duration)
     
     def solve_with_gbfs(self):
         """使用GBFS算法求解游戏"""
@@ -432,8 +485,13 @@ class GameAutoPlayer:
                     print(f"{int(cell['type']):4d}", end=" ")
             print()
     
-    def execute_solution(self, move_delay=1.0):
-        """执行GBFS求解的路径"""
+    def execute_solution(self, move_delay=1.0, manual_mode=False):
+        """执行GBFS求解的路径
+        
+        Args:
+            move_delay: 移动间隔时间（自动模式）
+            manual_mode: 是否手动模式（按空格执行每一步）
+        """
         if not self.solution_path:
             print("没有解决方案可执行")
             return False
@@ -442,44 +500,77 @@ class GameAutoPlayer:
         print("开始执行解决方案")
         print("=" * 60)
         print(f"总共需要 {len(self.solution_path)-1} 步")
-        print(f"移动间隔: {move_delay}秒")
-        print("\n⚠️ 注意：鼠标将被自动控制")
-        print("⚠️ 暂停：将鼠标移到屏幕左上角（移回游戏区域继续）")
-        print("⚠️ 退出：暂停时按 q 键")
+        
+        if manual_mode:
+            print("\n📋 手动执行模式")
+            print("按 空格键 或 回车键 执行下一步")
+            print("按 q 键 退出")
+        else:
+            print(f"移动间隔: {move_delay}秒")
+            print("\n⚠️ 注意：鼠标将被自动控制")
+            print("⚠️ 暂停：将鼠标移到屏幕左上角（移回游戏区域继续）")
+            print("⚠️ 退出：暂停时按 q 键")
+        
         
         input("\n按回车键开始执行...")
         
         total_moves = len(self.solution_path) - 1
+        step_idx = 0
         
-        for step, node in enumerate(self.solution_path):
+        while step_idx < len(self.solution_path):
+            node = self.solution_path[step_idx]
+            
             if node.from_action:
-                # 检查暂停/继续
-                x, y = pyautogui.position()
-                if x < 10 and y < 10:
-                    print("\n⏸️ 暂停执行 - 鼠标移入游戏区域后自动继续")
-                    
-                    # 等待鼠标回到游戏区域
-                    while True:
-                        mx, my = pyautogui.position()
-                        # 检查是否在游戏区域内
-                        if (self.game_region[0] <= mx <= self.game_region[2] and 
-                            self.game_region[1] <= my <= self.game_region[3]):
-                            print("▶️ 继续执行...")
-                            break
-                        # 检查是否按q退出
-                        if keyboard.is_pressed('q'):
-                            print("⚠️ 用户取消执行")
-                            return False
-                        time.sleep(0.1)
-                
                 start, end, dir_key = node.from_action
-                print(f"\n[步骤 {step}/{total_moves}]")
-                print(f"移动: {start} -> {end}, 方向: {dir_key}")
+                
+                # 手动模式：等待用户按键
+                if manual_mode:
+                    while True:
+                        print(f"\n[步骤 {step_idx}/{total_moves}] 移动: {start} -> {end}, 方向: {dir_key}")
+                        print("按 空格/回车 执行 | r 重试当前步 | q 退出")
+                        
+                        event = keyboard.read_event()
+                        if event.event_type == keyboard.KEY_DOWN:
+                            if event.name == 'space' or event.name == 'enter':
+                                break  # 执行当前步骤
+                            elif event.name == 'r':
+                                # 重试：跳回上一步，不执行当前步骤
+                                print("↩️ 重试：回到上一步...")
+                                if step_idx > 0:
+                                    step_idx -= 1
+                                continue  # 直接进入下一次循环
+                            elif event.name == 'q':
+                                print("⚠️ 用户取消执行")
+                                return False
+                else:
+                    # 自动模式：检查暂停/继续
+                    x, y = pyautogui.position()
+                    if x < 10 and y < 10:
+                        print("\n⏸️ 暂停执行 - 鼠标移入游戏区域后自动继续")
+                        
+                        # 等待鼠标回到游戏区域
+                        while True:
+                            mx, my = pyautogui.position()
+                            # 检查是否在游戏区域内
+                            if (self.game_region[0] <= mx <= self.game_region[2] and 
+                                self.game_region[1] <= my <= self.game_region[3]):
+                                print("▶️ 继续执行...")
+                                break
+                            # 检查是否按q退出
+                            if keyboard.is_pressed('q'):
+                                print("⚠️ 用户取消执行")
+                                return False
+                            time.sleep(0.1)
                 
                 # 执行移动
+                print(f"执行: {start} -> {end}")
                 self._execute_gbfs_move(start, end, dir_key)
                 self.move_count += 1
-                time.sleep(move_delay)
+                
+                if not manual_mode:
+                    time.sleep(move_delay)
+            
+            step_idx += 1
         
         print("\n" + "=" * 60)
         print("✓ 执行完成!")
@@ -526,9 +617,7 @@ class GameAutoPlayer:
             
             # 执行拖动，距离越远时间越长
             duration = 0.2 + distance * 0.15  # 增加拖动时间
-            pyautogui.moveTo(start_x, start_y, duration=0.1)
-            time.sleep(0.2)  # 移动后等待一下
-            pyautogui.dragTo(end_x, end_y, duration=duration)
+            self._drag_to(start_x, start_y, end_x, end_y, duration)
             time.sleep(0.3)  # 拖动后等待游戏响应
     
     def get_region_by_mouse(self):
@@ -1700,8 +1789,8 @@ class GameAutoPlayer:
             print(f"行滑动: 从 ({start_x}, {start_y}) 向右滑动 {move_cells} 格 ({distance} 像素)")
             
             pyautogui.moveTo(start_x, start_y)
-            time.sleep(0.2)
-            pyautogui.drag(distance, 0, duration=0.5)
+            time.sleep(0.1)
+            self._drag_rel(start_x, start_y, distance, 0, duration=0.5)
             time.sleep(0.5)
             
         elif move_type == 'col_slide':
@@ -1731,8 +1820,8 @@ class GameAutoPlayer:
             print(f"列滑动: 从 ({start_x}, {start_y}) 向下滑动 {move_cells} 格 ({distance} 像素)")
             
             pyautogui.moveTo(start_x, start_y)
-            time.sleep(0.2)
-            pyautogui.drag(0, distance, duration=0.5)
+            time.sleep(0.1)
+            self._drag_rel(start_x, start_y, 0, distance, duration=0.5)
             time.sleep(0.5)
             
         elif move_type == 'col_slide_align':
@@ -1764,8 +1853,8 @@ class GameAutoPlayer:
             start_y = from_cell['abs_center_y']
             
             pyautogui.moveTo(start_x, start_y)
-            time.sleep(0.2)
-            pyautogui.drag(0, pixel_distance, duration=0.8)  # 稍慢一点确保块组一起移动
+            time.sleep(0.1)
+            self._drag_rel(start_x, start_y, 0, pixel_distance, duration=0.8)  # 稍慢一点确保块组一起移动
             time.sleep(0.5)
             
         elif move_type == 'clearing_sequence':
@@ -1829,8 +1918,8 @@ class GameAutoPlayer:
             start_y = from_cell['abs_center_y']
             
             pyautogui.moveTo(start_x, start_y)
-            time.sleep(0.2)
-            pyautogui.drag(pixel_distance, 0, duration=0.8)  # 稍慢一点确保块组一起移动
+            time.sleep(0.1)
+            self._drag_rel(start_x, start_y, pixel_distance, 0, duration=0.8)  # 稍慢一点确保块组一起移动
             time.sleep(0.5)
         
         self.move_count += 1
@@ -1862,8 +1951,8 @@ class GameAutoPlayer:
             print(f"    简单移动: 从 ({start_x}, {start_y}) 向{direction}移动 {abs(to_col - from_col)} 格")
             
             pyautogui.moveTo(start_x, start_y)
-            time.sleep(0.2)
-            pyautogui.drag(pixel_distance, 0, duration=0.5)
+            time.sleep(0.1)
+            self._drag_rel(start_x, start_y, pixel_distance, 0, duration=0.5)
             
         else:  # up, down
             pixel_distance = abs(to_row - from_row) * self.grid.cell_height
@@ -1876,8 +1965,8 @@ class GameAutoPlayer:
             print(f"    简单移动: 从 ({start_x}, {start_y}) 向{direction}移动 {abs(to_row - from_row)} 格")
             
             pyautogui.moveTo(start_x, start_y)
-            time.sleep(0.2)
-            pyautogui.drag(0, pixel_distance, duration=0.5)
+            time.sleep(0.1)
+            self._drag_rel(start_x, start_y, 0, pixel_distance, duration=0.5)
         
         return True
     
@@ -2028,7 +2117,17 @@ def main():
             choice = input().strip().lower()
             
             if choice == '' or choice == 'y':
-                player.execute_solution(move_delay=0.5)
+                # 询问执行模式
+                print("\n选择执行模式:")
+                print("  1. 自动执行（连续自动完成所有步骤）")
+                print("  2. 手动执行（按空格/回车执行每一步）")
+                print("请选择 (1/2，回车=1): ", end="")
+                mode_choice = input().strip()
+                
+                if mode_choice == '2':
+                    player.execute_solution(move_delay=0.5, manual_mode=True)
+                else:
+                    player.execute_solution(move_delay=0.5, manual_mode=False)
             else:
                 print("已取消执行")
         else:
